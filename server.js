@@ -273,11 +273,43 @@ if (BOT_TOKEN) {
     bot.sendMessage(msg.chat.id, "Ludo rooms for this chat have been closed.");
   });
 
-  bot.onText(/^\/start(?:\s+(.+))?/, (msg, match) => {
-    if (!match?.[1]) return;
-    const code = String(match[1]).toUpperCase();
-    if (rooms.has(code)) {
-      bot.sendMessage(msg.chat.id, `🎲 Room ${code} is ready. Open the Ludo game from the room link.`);
+  bot.onText(/^\/start(?:\s+(.+))?/, async (msg, match) => {
+    try {
+      const chatId = msg.chat.id;
+      const payload = match?.[1] ? String(match[1]).trim().toUpperCase() : null;
+
+      if (!payload) {
+        const room = makeRoom("private", null);
+        const direct = BOT_USERNAME
+          ? `https://t.me/${BOT_USERNAME}?startapp=${room.code}`
+          : `${APP_URL}/?room=${room.code}`;
+
+        await bot.sendMessage(chatId, `🎲 *VELOCITY LUDO*\n\nPlay multiplayer Ludo with your friends.\n\nRoom: *${room.code}*\nPlayers: 0/4`, {
+          parse_mode: "Markdown",
+          reply_markup: { inline_keyboard: [
+            [{ text: "🎮 PLAY LUDO", url: direct }],
+            [{ text: "➕ CREATE NEW ROOM", url: direct }]
+          ]}
+        });
+        return;
+      }
+
+      const code = payload.replace(/^ROOM[_-]?/, "");
+      const room = rooms.get(code);
+      if (!room) {
+        await bot.sendMessage(chatId, `❌ Room *${code}* was not found or has expired.\n\nUse /ludo to create a new room.`, { parse_mode: "Markdown" });
+        return;
+      }
+
+      const direct = BOT_USERNAME
+        ? `https://t.me/${BOT_USERNAME}?startapp=${room.code}`
+        : `${APP_URL}/?room=${room.code}`;
+      await bot.sendMessage(chatId, `🎲 *LUDO ROOM*\n\nRoom: *${room.code}*\nPlayers: ${room.players.size}/4`, {
+        parse_mode: "Markdown",
+        reply_markup: { inline_keyboard: [[{ text: "🎮 JOIN LUDO", url: direct }]] }
+      });
+    } catch (e) {
+      console.error("Start command error:", e.message);
     }
   });
 
