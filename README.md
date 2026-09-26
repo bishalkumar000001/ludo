@@ -1,58 +1,45 @@
-# Velocity Ludo — Telegram Multiplayer Mini Game
+# Velocity Ludo — MongoDB Edition
 
-A deployable Telegram Ludo project with:
-- 2–4 player rooms
-- 6-character room codes
-- Group-created rooms
-- Telegram user name/avatar integration
-- WebSocket real-time state
-- Server-side dice and move validation
-- Reconnect support
-- Canvas renderer using requestAnimationFrame (capable of 120Hz where the device/WebView allows)
-- Heroku-ready Procfile
+Heroku-ready Telegram Mini App Ludo backend with persistent rooms.
 
-## 1. Create the Telegram bot
-Create a bot with @BotFather and copy the bot token.
+## Required Heroku config vars
 
-Set the bot's Main Mini App / direct-link configuration to the deployed HTTPS app as appropriate for your Telegram setup. The bot's username is used to create:
-`https://t.me/<BOT_USERNAME>?startapp=<ROOM_CODE>`
+- `BOT_TOKEN` — Telegram bot token
+- `MONGODB_URI` — MongoDB Atlas connection string
+- `MONGODB_DB` — optional, defaults to `velocity_ludo`
+- `WEBAPP_URL` — your public Heroku URL, for example `https://your-app.herokuapp.com`
 
-## 2. Deploy to Heroku
-
-Set these config vars:
-- `BOT_TOKEN`
-- `BOT_USERNAME` (without @)
-- `APP_URL` = your HTTPS Heroku URL
-
-Then deploy:
+## Deploy
 
 ```bash
-heroku create your-velocity-ludo
-heroku config:set BOT_TOKEN="YOUR_TOKEN"
-heroku config:set BOT_USERNAME="YourBotUsername"
-heroku config:set APP_URL="https://your-velocity-ludo.herokuapp.com"
+npm install
+npm start
+```
+
+For Heroku:
+
+```bash
+heroku config:set BOT_TOKEN="..."
+heroku config:set MONGODB_URI="mongodb+srv://..."
+heroku config:set MONGODB_DB="velocity_ludo"
+heroku config:set WEBAPP_URL="https://YOUR-APP.herokuapp.com"
 git push heroku main
 ```
 
-The project starts with:
-```bash
-node server.js
-```
+## MongoDB
 
-## 3. Test
+The server automatically creates indexes for room codes, player IDs, and `expiresAt`. Rooms expire after 24 hours of inactivity and are removed by MongoDB's TTL index.
 
-Open:
-`https://YOUR_APP.herokuapp.com/?room=ABC123`
+## Telegram deep links
 
-For the bot:
-- `/ludo` creates a room
-- `/ludo ABC123` opens/reuses a specific room
-- `/ludostop` closes rooms associated with the current group
+The frontend accepts all common room sources:
 
-## 4. Important production notes
+- `?room=ABC123`
+- `?tgWebAppStartParam=ABC123`
+- Telegram Mini App `initDataUnsafe.start_param`
 
-This starter keeps rooms in RAM. A Heroku dyno restart will clear active rooms. For persistent/scalable production play, move room state to Redis and player statistics to PostgreSQL.
+So `?tgWebAppStartParam=...` in Heroku logs is now handled correctly.
 
-For stronger anti-cheat, validate Telegram `initData` on the server and use a persistent player identity instead of trusting the browser-supplied ID.
+## Important
 
-The game renderer is designed around `requestAnimationFrame`; 120 FPS cannot be guaranteed because Telegram/WebView/device refresh rate controls the actual frame rate.
+This version keeps live WebSocket connections in the dyno but persists room state in MongoDB. For multiple Heroku dynos, add Redis/pub-sub later so WebSocket clients on different dynos share live events.

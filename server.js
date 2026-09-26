@@ -1,330 +1,318 @@
-const express = require("express");
-const http = require("http");
-const path = require("path");
-const WebSocket = require("ws");
-const TelegramBot = require("node-telegram-bot-api");
-const { customAlphabet } = require("nanoid");
-
-const app = express();
-const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
-const makeRoomCode = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 6);
+const express = require('express');
+const http = require('http');
+const { WebSocketServer } = require('ws');
+const TelegramBot = require('node-telegram-bot-api');
+const { MongoClient } = require('mongodb');
+const { customAlphabet } = require('nanoid');
 
 const PORT = process.env.PORT || 3000;
-const BOT_TOKEN = process.env.BOT_TOKEN || "";
-const BOT_USERNAME = (process.env.BOT_USERNAME || "").replace("@", "");
-const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const MONGODB_URI = process.env.MONGODB_URI;
+const DB_NAME = process.env.MONGODB_DB || 'velocity_ludo';
+const WEBAPP_URL = (process.env.WEBAPP_URL || '').replace(/\/$/, '');
 
+if (!BOT_TOKEN) console.warn('WARNING: BOT_TOKEN is missing');
+if (!MONGODB_URI) console.warn('WARNING: MONGODB_URI is missing');
+if (!WEBAPP_URL) console.warn('WARNING: WEBAPP_URL is missing');
+
+const app = express();
 app.use(express.json());
-app.use(express.static(path.join(__dirname, "public")));
+app.use(express.static('public'));
 
-const rooms = new Map();
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+const makeCode = customAlphabet('ABCDEFGHJKLMNPQRSTUVWXYZ23456789', 6);
 
-const COLORS = ["red", "green", "yellow", "blue"];
-const START = { red: 0, green: 13, yellow: 26, blue: 39 };
+let mongoClient;
+let db;
+let roomsCollection;
+const sockets = new Map(); // roomCode -> Set<WebSocket>
+const timers = new Map();
 
+async function connectMongo() {
+  if (!MONGODB_URI) return;
+  mongoClient = new MongoClient(MONGODB_URI, { maxPoolSize: 10 });
+  await mongoClient.connect();
+  db = mongoClient.db(DB_NAME);
+  roomsCollection = db.collection('rooms');
+  await roomsCollection.createIndex({ roomCode: 1 }, { unique: true });
+  await roomsCollection.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+  await roomsCollection.createIndex({ 'players.telegramId': 1 });
+  console.log(`MongoDB connected: ${DB_NAME}`);
+}
+
+function now() { return new Date(); }
 function roomView(room) {
   return {
-    code: room.code,
+    roomCode: room.roomCode,
     mode: room.mode,
     groupId: room.groupId || null,
     status: room.status,
     hostId: room.hostId,
-    current: room.current,
-    dice: room.dice,
-    winner: room.winner,
-    players: [...room.players.values()].map(p => ({
-      id: p.id,
-      name: p.name,
-      color: p.color,
-      avatar: p.avatar || "",
-      connected: !!p.ws && p.ws.readyState === WebSocket.OPEN,
-      finished: p.tokens.filter(x => x >= 57).length
-    }))
+    players: room.players || [],
+    current: room.current || 0,
+    dice: room.dice ?? null,
+    winner: room.winner ?? null,
+    board: room.board || null
   };
 }
 
-function broadcast(room) {
-  const payload = JSON.stringify({ type: "state", room: roomView(room) });
-  for (const p of room.players.values()) {
-    if (p.ws && p.ws.readyState === WebSocket.OPEN) p.ws.send(payload);
+async function createRoom({ mode = 'private', groupId = null, host = null }) {
+  if (!roomsCollection) throw new Error('MongoDB is not connected. Add MONGODB_URI.');
+  for (let i = 0; i < 10; i++) {
+    const roomCode = makeCode();
+    const room = {
+      roomCode,
+      mode,
+      groupId,
+      status: 'waiting',
+      hostId: host?.telegramId || null,
+      players: host ? [host] : [],
+      current: 0,
+      dice: null,
+      winner: null,
+      board: null,
+      createdAt: now(),
+      updatedAt: now(),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
+    };
+    try {
+      await roomsCollection.insertOne(room);
+      return room;
+    } catch (e) {
+      if (e.code !== 11000) throw e;
+    }
   }
+  throw new Error('Could not generate a unique room code');
 }
 
-function makeRoom(mode = "private", groupId = null) {
-  const code = makeRoomCode();
-  const room = {
-    code, mode, groupId,
-    status: "waiting",
-    players: new Map(),
-    hostId: null,
-    current: 0,
-    dice: null,
-    winner: null,
-    lastRollAt: 0
+async function getRoom(code) {
+  if (!roomsCollection) return null;
+  return roomsCollection.findOne({ roomCode: String(code || '').toUpperCase() });
+}
+
+async function touchRoom(code, patch = {}) {
+  if (!roomsCollection) return null;
+  const update = {
+    ...patch,
+    updatedAt: now(),
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
   };
-  rooms.set(code, room);
-  return room;
+  const result = await roomsCollection.findOneAndUpdate(
+    { roomCode: code.toUpperCase() },
+    { $set: update },
+    { returnDocument: 'after' }
+  );
+  return result;
 }
 
-function addPlayer(room, id, name, avatar) {
-  if (room.players.has(id)) return room.players.get(id);
-  if (room.players.size >= 4) return null;
-  const color = COLORS[room.players.size];
-  const p = { id, name: name || "Player", avatar: avatar || "", color, tokens: [-1,-1,-1,-1], ws: null };
-  room.players.set(id, p);
-  if (!room.hostId) room.hostId = id;
-  return p;
+async function addPlayer(code, player) {
+  const room = await getRoom(code);
+  if (!room) return null;
+  const existing = (room.players || []).find(p => String(p.telegramId) === String(player.telegramId));
+  if (existing) return room;
+  if ((room.players || []).length >= 4) throw new Error('ROOM_FULL');
+  const updated = await roomsCollection.findOneAndUpdate(
+    { roomCode: code.toUpperCase(), 'players.telegramId': { $ne: player.telegramId }, $expr: { $lt: [{ $size: '$players' }, 4] } },
+    { $push: { players: player }, $set: { updatedAt: now(), expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) } },
+    { returnDocument: 'after' }
+  );
+  if (updated) return updated;
+  return getRoom(code);
 }
 
-function currentPlayer(room) {
-  const ids = [...room.players.keys()];
-  return ids[room.current] ? room.players.get(ids[room.current]) : null;
+function send(ws, payload) {
+  if (ws.readyState === 1) ws.send(JSON.stringify(payload));
+}
+function broadcast(code, payload) {
+  const set = sockets.get(code);
+  if (!set) return;
+  for (const ws of set) send(ws, payload);
+}
+async function broadcastRoom(code) {
+  const room = await getRoom(code);
+  if (room) broadcast(code, { type: 'state', room: roomView(room) });
+}
+function registerSocket(code, ws) {
+  if (!sockets.has(code)) sockets.set(code, new Set());
+  sockets.get(code).add(ws);
+  ws.roomCode = code;
+}
+function unregisterSocket(ws) {
+  const code = ws.roomCode;
+  if (!code || !sockets.has(code)) return;
+  sockets.get(code).delete(ws);
+  if (!sockets.get(code).size) sockets.delete(code);
 }
 
-function nextTurn(room) {
-  const ids = [...room.players.keys()];
-  if (!ids.length) return;
-  let tries = 0;
-  do {
-    room.current = (room.current + 1) % ids.length;
-    tries++;
-    const p = room.players.get(ids[room.current]);
-    if (p && !p.tokens.every(x => x >= 57)) break;
-  } while (tries <= ids.length);
-  room.dice = null;
+function scheduleTurn(code) {
+  clearTimeout(timers.get(code));
+  timers.set(code, setTimeout(async () => {
+    const room = await getRoom(code);
+    if (!room || room.status !== 'playing') return;
+    const next = ((room.current || 0) + 1) % Math.max(room.players.length, 1);
+    await touchRoom(code, { current: next, dice: null });
+    await broadcastRoom(code);
+  }, 30000));
 }
 
-function roll(room, playerId) {
-  const p = currentPlayer(room);
-  if (!p || p.id !== playerId || room.status !== "playing") return { ok:false, error:"Not your turn" };
-  if (room.dice !== null) return { ok:false, error:"Move the rolled piece first" };
-  const now = Date.now();
-  if (now - room.lastRollAt < 700) return { ok:false, error:"Too fast" };
-  room.lastRollAt = now;
-  room.dice = Math.floor(Math.random() * 6) + 1;
-  return { ok:true, value:room.dice };
-}
+wss.on('connection', ws => {
+  ws.on('message', async raw => {
+    try {
+      const msg = JSON.parse(raw.toString());
+      const code = String(msg.roomCode || '').toUpperCase();
+      if (!code) return send(ws, { type: 'error', message: 'Room code missing' });
 
-// Track a token on a 0..56 race path; -1 home, 57 finished.
-// A roll of 6 releases a home token to 0. A token cannot move beyond 56.
-function move(room, playerId, tokenIndex) {
-  const p = currentPlayer(room);
-  if (!p || p.id !== playerId || room.status !== "playing") return {ok:false,error:"Not your turn"};
-  if (room.dice === null) return {ok:false,error:"Roll first"};
-  const i = Number(tokenIndex);
-  if (!Number.isInteger(i) || i < 0 || i > 3) return {ok:false,error:"Bad token"};
-  const old = p.tokens[i];
-  const d = room.dice;
-
-  if (old === 57) return {ok:false,error:"Token already home"};
-  let next = old;
-  if (old === -1) {
-    if (d !== 6) return {ok:false,error:"Need a 6 to enter"};
-    next = 0;
-  } else {
-    if (old + d > 56) return {ok:false,error:"That token cannot move"};
-    next = old + d;
-  }
-
-  p.tokens[i] = next;
-  let captured = false;
-
-  // Simple shared-track capture. Own tokens are safe from each other.
-  if (next >= 0 && next < 56) {
-    for (const other of room.players.values()) {
-      if (other.id === p.id) continue;
-      for (let j = 0; j < other.tokens.length; j++) {
-        if (other.tokens[j] === next) {
-          other.tokens[j] = -1;
-          captured = true;
+      if (msg.type === 'join') {
+        const room = await getRoom(code);
+        if (!room) return send(ws, { type: 'error', code: 'ROOM_NOT_FOUND', message: 'Room not found or expired' });
+        registerSocket(code, ws);
+        let player = msg.player || {};
+        if (player.telegramId) {
+          try {
+            const updated = await addPlayer(code, {
+              telegramId: String(player.telegramId),
+              username: player.username || '',
+              firstName: player.firstName || 'Player',
+              photoUrl: player.photoUrl || ''
+            });
+            if (!updated) return send(ws, { type: 'error', message: 'Could not join room' });
+          } catch (e) {
+            if (e.message === 'ROOM_FULL') return send(ws, { type: 'error', code: 'ROOM_FULL', message: 'Room is full' });
+            throw e;
+          }
         }
-      }
-    }
-  }
-
-  if (next === 56) p.tokens[i] = 57;
-  const finished = p.tokens.every(x => x === 57);
-  if (finished) {
-    room.status = "finished";
-    room.winner = p.id;
-  } else if (d !== 6 && !captured) {
-    nextTurn(room);
-  } else {
-    room.dice = null;
-  }
-  return {ok:true};
-}
-
-wss.on("connection", ws => {
-  let room = null;
-  let player = null;
-
-  ws.on("message", raw => {
-    let msg;
-    try { msg = JSON.parse(raw.toString()); } catch { return; }
-
-    if (msg.type === "join") {
-      const code = String(msg.code || "").toUpperCase();
-      room = rooms.get(code);
-      if (!room) {
-        ws.send(JSON.stringify({type:"error", error:"Room not found"}));
+        const current = await getRoom(code);
+        send(ws, { type: 'joined', room: roomView(current) });
+        await broadcastRoom(code);
         return;
       }
-      if (room.status === "finished") {
-        ws.send(JSON.stringify({type:"error", error:"Room has finished"}));
-        return;
+
+      const room = await getRoom(code);
+      if (!room) return send(ws, { type: 'error', code: 'ROOM_NOT_FOUND', message: 'Room not found or expired' });
+
+      if (msg.type === 'start') {
+        if ((room.players || []).length < 2) return send(ws, { type: 'error', message: 'Need at least 2 players to start' });
+        await touchRoom(code, { status: 'playing', current: 0, dice: null, winner: null });
+        scheduleTurn(code);
+        await broadcastRoom(code);
+      } else if (msg.type === 'roll') {
+        if (room.status !== 'playing') return;
+        const playerId = String(msg.telegramId || '');
+        const currentPlayer = room.players?.[room.current];
+        if (!currentPlayer || String(currentPlayer.telegramId) !== playerId) return send(ws, { type: 'error', message: 'Not your turn' });
+        const dice = Math.floor(Math.random() * 6) + 1;
+        await touchRoom(code, { dice });
+        await broadcastRoom(code);
+      } else if (msg.type === 'move') {
+        // Board/token movement is intentionally client-animation driven for now;
+        // the server records the move and advances the turn.
+        if (room.status !== 'playing') return;
+        const playerId = String(msg.telegramId || '');
+        const currentPlayer = room.players?.[room.current];
+        if (!currentPlayer || String(currentPlayer.telegramId) !== playerId) return send(ws, { type: 'error', message: 'Not your turn' });
+        const next = ((room.current || 0) + 1) % room.players.length;
+        await touchRoom(code, { current: next, dice: null });
+        scheduleTurn(code);
+        await broadcastRoom(code);
+      } else if (msg.type === 'rematch') {
+        await touchRoom(code, { status: 'waiting', current: 0, dice: null, winner: null });
+        clearTimeout(timers.get(code));
+        await broadcastRoom(code);
       }
-      player = addPlayer(room, String(msg.playerId), msg.name, msg.avatar);
-      if (!player) {
-        ws.send(JSON.stringify({type:"error", error:"Room is full"}));
-        return;
-      }
-      player.ws = ws;
-      if (room.players.size >= 2 && room.status === "waiting") room.status = "playing";
-      ws.send(JSON.stringify({type:"joined", playerId:player.id, color:player.color}));
-      broadcast(room);
-      return;
-    }
-
-    if (!room || !player) return;
-
-    if (msg.type === "start") {
-      if (player.id !== room.hostId) return;
-      if (room.players.size < 2) {
-        ws.send(JSON.stringify({type:"error",error:"At least 2 players are required"}));
-        return;
-      }
-      room.status = "playing";
-      room.current = 0;
-      room.dice = null;
-      broadcast(room);
-    }
-
-    if (msg.type === "roll") {
-      const result = roll(room, player.id);
-      if (!result.ok) ws.send(JSON.stringify({type:"error",error:result.error}));
-      broadcast(room);
-    }
-
-    if (msg.type === "move") {
-      const result = move(room, player.id, msg.token);
-      if (!result.ok) ws.send(JSON.stringify({type:"error",error:result.error}));
-      broadcast(room);
-    }
-
-    if (msg.type === "rematch") {
-      if (room.status !== "finished") return;
-      for (const p of room.players.values()) p.tokens = [-1,-1,-1,-1];
-      room.status = "playing";
-      room.winner = null;
-      room.current = 0;
-      room.dice = null;
-      broadcast(room);
+    } catch (err) {
+      console.error('WS error:', err);
+      send(ws, { type: 'error', message: 'Server error' });
     }
   });
-
-  ws.on("close", () => {
-    if (player) player.ws = null;
-    if (room) broadcast(room);
-  });
+  ws.on('close', () => unregisterSocket(ws));
 });
 
-// REST room creation, useful for the Telegram bot.
-app.post("/api/rooms", (req,res) => {
-  const room = makeRoom(req.body?.mode || "private", req.body?.groupId || null);
-  res.json({ code: room.code, url: `${APP_URL}/?room=${room.code}` });
+app.get('/health', async (req, res) => {
+  let mongo = false;
+  try { mongo = !!roomsCollection && (await db.command({ ping: 1 })).ok === 1; } catch {}
+  res.json({ ok: true, mongo, uptime: process.uptime() });
 });
 
-app.get("/health", (req,res) => res.json({ok:true, rooms:rooms.size}));
+app.get('/api/rooms/:code', async (req, res) => {
+  try {
+    const room = await getRoom(req.params.code);
+    if (!room) return res.status(404).json({ ok: false, error: 'ROOM_NOT_FOUND' });
+    res.json({ ok: true, room: roomView(room) });
+  } catch (e) { res.status(500).json({ ok: false, error: 'SERVER_ERROR' }); }
+});
 
-// Telegram bot: /ludo creates a room; /ludo CODE opens/joins one.
-// For a Mini App direct-link setup, configure the bot's Main Mini App in BotFather.
+app.post('/api/rooms', async (req, res) => {
+  try {
+    const room = await createRoom({ mode: req.body?.mode || 'private', groupId: req.body?.groupId || null, host: req.body?.host || null });
+    res.json({ ok: true, room: roomView(room) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+let bot;
 if (BOT_TOKEN) {
-  const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+  bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
-  bot.onText(/^\/ludo(?:\s+([A-Za-z0-9]+))?/, async (msg, match) => {
+  bot.onText(/^\/start(?:\s+(.+))?$/, async (msg, match) => {
+    const chatId = msg.chat.id;
+    const payload = (match?.[1] || '').trim().toUpperCase();
     try {
-      const chatId = msg.chat.id;
-      const requested = match && match[1] ? match[1].toUpperCase() : null;
-      let room = requested ? rooms.get(requested) : null;
-      if (!room) room = makeRoom(msg.chat.type === "group" || msg.chat.type === "supergroup" ? "group" : "private",
-                                msg.chat.type === "group" || msg.chat.type === "supergroup" ? String(chatId) : null);
-
-      const direct = BOT_USERNAME
-        ? `https://t.me/${BOT_USERNAME}?startapp=${room.code}`
-        : `${APP_URL}/?room=${room.code}`;
-
-      const text = `🎲 LUDO\\n\\nRoom: ${room.code}\\nPlayers: 0/4\\n\\nOpen the game and share the room code with your friends.`;
-      await bot.sendMessage(chatId, text, {
-        reply_markup: {
-          inline_keyboard: [[{text:"🎮 PLAY LUDO", url:direct}]]
-        }
-      });
-    } catch (e) {
-      console.error("Telegram error:", e.message);
-    }
-  });
-
-  bot.onText(/^\/ludostop$/, (msg) => {
-    for (const [code, room] of rooms) {
-      if (room.groupId === String(msg.chat.id)) rooms.delete(code);
-    }
-    bot.sendMessage(msg.chat.id, "Ludo rooms for this chat have been closed.");
-  });
-
-  bot.onText(/^\/start(?:\s+(.+))?/, async (msg, match) => {
-    try {
-      const chatId = msg.chat.id;
-      const payload = match?.[1] ? String(match[1]).trim().toUpperCase() : null;
-
-      if (!payload) {
-        const room = makeRoom("private", null);
-        const direct = BOT_USERNAME
-          ? `https://t.me/${BOT_USERNAME}?startapp=${room.code}`
-          : `${APP_URL}/?room=${room.code}`;
-
-        await bot.sendMessage(chatId, `🎲 *VELOCITY LUDO*\n\nPlay multiplayer Ludo with your friends.\n\nRoom: *${room.code}*\nPlayers: 0/4`, {
-          parse_mode: "Markdown",
-          reply_markup: { inline_keyboard: [
-            [{ text: "🎮 PLAY LUDO", url: direct }],
-            [{ text: "➕ CREATE NEW ROOM", url: direct }]
-          ]}
+      if (payload) {
+        const room = await getRoom(payload);
+        if (!room) return bot.sendMessage(chatId, 'That Ludo room was not found or has expired.');
+        const url = `${WEBAPP_URL}/?room=${encodeURIComponent(payload)}`;
+        return bot.sendMessage(chatId, `Ludo room ${payload} is ready.`, {
+          reply_markup: { inline_keyboard: [[{ text: 'JOIN LUDO', web_app: { url } }]] }
         });
-        return;
       }
-
-      const code = payload.replace(/^ROOM[_-]?/, "");
-      const room = rooms.get(code);
-      if (!room) {
-        await bot.sendMessage(chatId, `❌ Room *${code}* was not found or has expired.\n\nUse /ludo to create a new room.`, { parse_mode: "Markdown" });
-        return;
-      }
-
-      const direct = BOT_USERNAME
-        ? `https://t.me/${BOT_USERNAME}?startapp=${room.code}`
-        : `${APP_URL}/?room=${room.code}`;
-      await bot.sendMessage(chatId, `🎲 *LUDO ROOM*\n\nRoom: *${room.code}*\nPlayers: ${room.players.size}/4`, {
-        parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: [[{ text: "🎮 JOIN LUDO", url: direct }]] }
+      const host = { telegramId: String(msg.from.id), username: msg.from.username || '', firstName: msg.from.first_name || 'Player', photoUrl: '' };
+      const room = await createRoom({ mode: 'private', host });
+      const url = `${WEBAPP_URL}/?room=${encodeURIComponent(room.roomCode)}`;
+      await bot.sendMessage(chatId, `🎲 VELOCITY LUDO\n\nRoom: ${room.roomCode}\nPlayers: 1/4\n\nCreate a room or invite other players.`, {
+        reply_markup: { inline_keyboard: [[{ text: 'PLAY LUDO', web_app: { url } }], [{ text: 'CREATE NEW ROOM', callback_data: 'ludo_new' }]] }
       });
     } catch (e) {
-      console.error("Start command error:", e.message);
+      console.error('/start:', e);
+      bot.sendMessage(chatId, 'Ludo is temporarily unavailable. Please try again.');
     }
   });
 
-  console.log("Telegram bot polling enabled");
-} else {
-  console.log("BOT_TOKEN not set; running web game only.");
+  bot.onText(/^\/ludo$/, async msg => {
+    try {
+      const host = { telegramId: String(msg.from.id), username: msg.from.username || '', firstName: msg.from.first_name || 'Player', photoUrl: '' };
+      const room = await createRoom({ mode: msg.chat.type === 'private' ? 'private' : 'group', groupId: msg.chat.type === 'private' ? null : String(msg.chat.id), host });
+      const url = `${WEBAPP_URL}/?room=${encodeURIComponent(room.roomCode)}`;
+      await bot.sendMessage(msg.chat.id, `🎲 VELOCITY LUDO\n\nRoom: ${room.roomCode}\nPlayers: 1/4`, {
+        reply_markup: { inline_keyboard: [[{ text: 'OPEN LUDO', web_app: { url } }]] }
+      });
+    } catch (e) {
+      console.error('/ludo:', e);
+      bot.sendMessage(msg.chat.id, 'Could not create the Ludo room.');
+    }
+  });
+
+  bot.on('callback_query', async q => {
+    if (q.data !== 'ludo_new') return;
+    try {
+      const host = { telegramId: String(q.from.id), username: q.from.username || '', firstName: q.from.first_name || 'Player', photoUrl: '' };
+      const room = await createRoom({ mode: 'private', host });
+      const url = `${WEBAPP_URL}/?room=${encodeURIComponent(room.roomCode)}`;
+      await bot.answerCallbackQuery(q.id);
+      await bot.sendMessage(q.message.chat.id, `New Ludo room: ${room.roomCode}`, { reply_markup: { inline_keyboard: [[{ text: 'OPEN LUDO', web_app: { url } }]] } });
+    } catch (e) {
+      await bot.answerCallbackQuery(q.id, { text: 'Could not create room' });
+    }
+  });
+
+  bot.on('polling_error', err => console.error('Telegram polling error:', err.message));
+  console.log('Telegram bot polling enabled');
 }
 
-setInterval(() => {
-  const cutoff = Date.now() - 1000 * 60 * 60;
-  for (const [code, room] of rooms) {
-    const connected = [...room.players.values()].some(p => p.ws && p.ws.readyState === WebSocket.OPEN);
-    if (!connected && room.status === "waiting") rooms.delete(code);
-    if (room.status === "finished" && room.lastActivity && room.lastActivity < cutoff) rooms.delete(code);
-  }
-}, 60_000);
-
-server.listen(PORT, () => console.log(`Velocity Ludo listening on ${PORT}`));
+connectMongo()
+  .then(() => server.listen(PORT, () => console.log(`Velocity Ludo listening on ${PORT}`)))
+  .catch(err => {
+    console.error('MongoDB startup error:', err);
+    process.exit(1);
+  });
