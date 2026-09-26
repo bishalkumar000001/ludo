@@ -303,7 +303,7 @@ if (BOT_TOKEN) {
       const host = { telegramId: String(msg.from.id), username: msg.from.username || '', firstName: msg.from.first_name || 'Player', photoUrl: '' };
       const room = await createRoom({ mode: msg.chat.type === 'private' ? 'private' : 'group', groupId: msg.chat.type === 'private' ? null : String(msg.chat.id), host });
       await bot.sendMessage(msg.chat.id, `🎲 VELOCITY LUDO\n\nRoom: ${room.roomCode}\nPlayers: 1/4`, {
-        reply_markup: { inline_keyboard: [[launchButton(room.roomCode, 'OPEN LUDO', q.message.chat.type === 'private')]] }
+        reply_markup: { inline_keyboard: [[launchButton(room.roomCode, 'OPEN LUDO', msg.chat.type === 'private')]] }
       });
     } catch (e) {
       console.error('/ludo:', e);
@@ -317,7 +317,7 @@ if (BOT_TOKEN) {
       const host = { telegramId: String(q.from.id), username: q.from.username || '', firstName: q.from.first_name || 'Player', photoUrl: '' };
       const room = await createRoom({ mode: 'private', host });
       await bot.answerCallbackQuery(q.id);
-      await bot.sendMessage(q.message.chat.id, `New Ludo room: ${room.roomCode}`, { reply_markup: { inline_keyboard: [[launchButton(room.roomCode, 'OPEN LUDO', q.message.chat.type === 'private')]] } });
+      await bot.sendMessage(q.message.chat.id, `New Ludo room: ${room.roomCode}`, { reply_markup: { inline_keyboard: [[launchButton(room.roomCode, 'OPEN LUDO', msg.chat.type === 'private')]] } });
     } catch (e) {
       await bot.answerCallbackQuery(q.id, { text: 'Could not create room' });
     }
