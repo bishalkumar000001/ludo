@@ -252,8 +252,29 @@ app.post('/api/rooms', async (req, res) => {
 });
 
 let bot;
+let botUsername = process.env.BOT_USERNAME || '';
+
+function appUrl(code) {
+  return `${WEBAPP_URL}/?room=${encodeURIComponent(code)}`;
+}
+
+function miniAppDeepLink(code) {
+  if (botUsername) return `https://t.me/${botUsername}?startapp=${encodeURIComponent(code)}`;
+  return appUrl(code);
+}
+
+function launchButton(code, text = 'OPEN LUDO', isPrivate = false) {
+  const url = appUrl(code);
+  // Telegram only permits inline web_app buttons in private chats.
+  // In groups, use a Mini App deep-link URL instead.
+  return isPrivate
+    ? { text, web_app: { url } }
+    : { text, url: miniAppDeepLink(code) };
+}
+
 if (BOT_TOKEN) {
   bot = new TelegramBot(BOT_TOKEN, { polling: true });
+  bot.getMe().then(me => { botUsername = botUsername || me.username || ''; }).catch(() => {});
 
   bot.onText(/^\/start(?:\s+(.+))?$/, async (msg, match) => {
     const chatId = msg.chat.id;
@@ -262,16 +283,14 @@ if (BOT_TOKEN) {
       if (payload) {
         const room = await getRoom(payload);
         if (!room) return bot.sendMessage(chatId, 'That Ludo room was not found or has expired.');
-        const url = `${WEBAPP_URL}/?room=${encodeURIComponent(payload)}`;
         return bot.sendMessage(chatId, `Ludo room ${payload} is ready.`, {
-          reply_markup: { inline_keyboard: [[{ text: 'JOIN LUDO', web_app: { url } }]] }
+          reply_markup: { inline_keyboard: [[launchButton(payload, 'JOIN LUDO', true)]] }
         });
       }
       const host = { telegramId: String(msg.from.id), username: msg.from.username || '', firstName: msg.from.first_name || 'Player', photoUrl: '' };
       const room = await createRoom({ mode: 'private', host });
-      const url = `${WEBAPP_URL}/?room=${encodeURIComponent(room.roomCode)}`;
       await bot.sendMessage(chatId, `🎲 VELOCITY LUDO\n\nRoom: ${room.roomCode}\nPlayers: 1/4\n\nCreate a room or invite other players.`, {
-        reply_markup: { inline_keyboard: [[{ text: 'PLAY LUDO', web_app: { url } }], [{ text: 'CREATE NEW ROOM', callback_data: 'ludo_new' }]] }
+        reply_markup: { inline_keyboard: [[launchButton(room.roomCode, 'PLAY LUDO', true)], [{ text: 'CREATE NEW ROOM', callback_data: 'ludo_new' }]] }
       });
     } catch (e) {
       console.error('/start:', e);
@@ -283,9 +302,8 @@ if (BOT_TOKEN) {
     try {
       const host = { telegramId: String(msg.from.id), username: msg.from.username || '', firstName: msg.from.first_name || 'Player', photoUrl: '' };
       const room = await createRoom({ mode: msg.chat.type === 'private' ? 'private' : 'group', groupId: msg.chat.type === 'private' ? null : String(msg.chat.id), host });
-      const url = `${WEBAPP_URL}/?room=${encodeURIComponent(room.roomCode)}`;
       await bot.sendMessage(msg.chat.id, `🎲 VELOCITY LUDO\n\nRoom: ${room.roomCode}\nPlayers: 1/4`, {
-        reply_markup: { inline_keyboard: [[{ text: 'OPEN LUDO', web_app: { url } }]] }
+        reply_markup: { inline_keyboard: [[launchButton(room.roomCode, 'OPEN LUDO', q.message.chat.type === 'private')]] }
       });
     } catch (e) {
       console.error('/ludo:', e);
@@ -298,9 +316,8 @@ if (BOT_TOKEN) {
     try {
       const host = { telegramId: String(q.from.id), username: q.from.username || '', firstName: q.from.first_name || 'Player', photoUrl: '' };
       const room = await createRoom({ mode: 'private', host });
-      const url = `${WEBAPP_URL}/?room=${encodeURIComponent(room.roomCode)}`;
       await bot.answerCallbackQuery(q.id);
-      await bot.sendMessage(q.message.chat.id, `New Ludo room: ${room.roomCode}`, { reply_markup: { inline_keyboard: [[{ text: 'OPEN LUDO', web_app: { url } }]] } });
+      await bot.sendMessage(q.message.chat.id, `New Ludo room: ${room.roomCode}`, { reply_markup: { inline_keyboard: [[launchButton(room.roomCode, 'OPEN LUDO', q.message.chat.type === 'private')]] } });
     } catch (e) {
       await bot.answerCallbackQuery(q.id, { text: 'Could not create room' });
     }
