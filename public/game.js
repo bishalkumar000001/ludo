@@ -4,6 +4,7 @@ tg?.expand();
 
 const params = new URLSearchParams(location.search);
 const tgStart = tg?.initDataUnsafe?.start_param || '';
+const tgUser = tg?.initDataUnsafe?.user || null;
 const roomCode = (params.get('room') || params.get('tgWebAppStartParam') || tgStart || '').trim().toUpperCase();
 const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
 const wsUrl = `${wsProto}://${location.host}`;
@@ -22,12 +23,13 @@ const rematchBtn = document.getElementById('rematch');
 
 function getMe() {
   const u = tg?.initDataUnsafe?.user;
-  if (u?.id) return { telegramId:String(u.id), username:u.username||'', firstName:u.first_name||'Player', photoUrl:u.photo_url||'' };
+  if (u?.id) return { telegramId:String(u.id), username:String(u.username||'').replace(/^@/,''), firstName:String(u.first_name||u.username||'Player'), lastName:String(u.last_name||''), photoUrl:u.photo_url||'' };
   let id = localStorage.getItem('velocity_ludo_guest_id');
   if (!id) { id = `guest_${crypto.randomUUID?.() || Math.random().toString(36).slice(2)}`; localStorage.setItem('velocity_ludo_guest_id', id); }
-  return { telegramId:id, username:'', firstName:'Player', photoUrl:'' };
+  return { telegramId:id, username:'', firstName:'Guest', lastName:'', photoUrl:'' };
 }
 state.me = getMe();
+if (!tgUser && tg) setTimeout(() => { state.me = getMe(); }, 250);
 
 const colors = ['#ff475d','#45d483','#ffd447','#4f8cff'];
 const track = [];
@@ -121,7 +123,7 @@ function renderPlayers(){
     el.className='player'+(i===state.room.current?' turn':'');
     const score=(state.room?.tokens?.[i]||[]).filter(v=>v===57).length;
     el.innerHTML=`<img class="avatar" src="${escapeAttr(p.photoUrl||'')}" onerror="this.style.visibility='hidden'">
-      <div class="pname">${escapeHtml(p.firstName||p.username||'Player')} ${score?`<small>${score}/4</small>`:''}</div>`;
+      <div class="pname">${escapeHtml(p.firstName||p.username||'Player')}${p.username?` <small>@${escapeHtml(p.username)}</small>`:''} ${score?`<small>${score}/4</small>`:''}</div>`;
     playersEl.appendChild(el);
   });
 }
@@ -168,6 +170,7 @@ function connect(){
     if(m.type==='joined'||m.type==='state'){state.room=m.room;render();}
     if(m.type==='error'){
       setStatus(m.message||'Error',true);
+      if(m.code==='IDENTITY_MISSING') connection.textContent='IDENTITY ERROR';
       if(m.code==='ROOM_NOT_FOUND') connection.textContent='ROOM EXPIRED';
     }
   };
