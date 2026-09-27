@@ -42,6 +42,31 @@ async function connectMongo() {
 }
 
 function now() { return new Date(); }
+
+function normalizePlayer(raw = {}) {
+  const telegramId = raw.telegramId != null ? String(raw.telegramId).trim() : '';
+  const username = String(raw.username || '').trim().replace(/^@/, '').slice(0, 64);
+  const firstName = String(raw.firstName || raw.first_name || '').trim().slice(0, 64);
+  const lastName = String(raw.lastName || raw.last_name || '').trim().slice(0, 64);
+  const displayName = firstName || username || 'Player';
+  return {
+    telegramId,
+    username,
+    firstName: displayName,
+    lastName,
+    photoUrl: String(raw.photoUrl || raw.photo_url || '').trim().slice(0, 1000)
+  };
+}
+
+function telegramPlayer(user) {
+  return normalizePlayer({
+    telegramId: user?.id,
+    username: user?.username,
+    firstName: user?.first_name,
+    lastName: user?.last_name,
+    photoUrl: user?.photo_url
+  });
+}
 function roomView(room) {
   return {
     roomCode: room.roomCode,
@@ -49,7 +74,7 @@ function roomView(room) {
     groupId: room.groupId || null,
     status: room.status,
     hostId: room.hostId,
-    players: room.players || [],
+    players: (room.players || []).map(normalizePlayer),
     current: room.current || 0,
     dice: room.dice ?? null,
     winner: room.winner ?? null,
@@ -220,12 +245,9 @@ wss.on('connection', ws => {
             return send(ws, { type: 'error', code: 'GAME_STARTED', message: 'This game has already started.' });
           }
           try {
-            const updated = await addPlayer(code, {
-              telegramId: String(player.telegramId),
-              username: String(player.username || '').slice(0, 64),
-              firstName: String(player.firstName || 'Player').slice(0, 64),
-              photoUrl: String(player.photoUrl || '').slice(0, 1000)
-            });
+            const normalized = normalizePlayer(player);
+            if (!normalized.telegramId) return send(ws, { type: 'error', code: 'IDENTITY_MISSING', message: 'Telegram user identity was not found. Reopen the Ludo game from Telegram.' });
+            const updated = await addPlayer(code, normalized);
             if (!updated) return send(ws, { type: 'error', message: 'Could not join room' });
           } catch (e) {
             if (e.message === 'ROOM_FULL') return send(ws, { type: 'error', code: 'ROOM_FULL', message: 'Room is full' });
@@ -415,7 +437,7 @@ if (BOT_TOKEN) {
           reply_markup: { inline_keyboard: [[launchButton(payload, 'JOIN LUDO', true)]] }
         });
       }
-      const host = { telegramId: String(msg.from.id), username: msg.from.username || '', firstName: msg.from.first_name || 'Player', photoUrl: '' };
+      const host = telegramPlayer(msg.from);
       const room = await createRoom({ mode: 'private', host });
       await bot.sendMessage(chatId, `🎲 VELOCITY LUDO\n\nRoom: ${room.roomCode}\nPlayers: 1/4\n\nCreate a room or invite other players.`, {
         reply_markup: { inline_keyboard: [[launchButton(room.roomCode, 'PLAY LUDO', true)], [{ text: 'CREATE NEW ROOM', callback_data: 'ludo_new' }]] }
@@ -428,7 +450,7 @@ if (BOT_TOKEN) {
 
   bot.onText(/^\/ludo$/, async msg => {
     try {
-      const host = { telegramId: String(msg.from.id), username: msg.from.username || '', firstName: msg.from.first_name || 'Player', photoUrl: '' };
+      const host = telegramPlayer(msg.from);
       const room = await createRoom({ mode: msg.chat.type === 'private' ? 'private' : 'group', groupId: msg.chat.type === 'private' ? null : String(msg.chat.id), host });
       await bot.sendMessage(msg.chat.id, `🎲 VELOCITY LUDO\n\nRoom: ${room.roomCode}\nPlayers: 1/4`, {
         reply_markup: { inline_keyboard: [[launchButton(room.roomCode, 'OPEN LUDO', msg.chat.type === 'private')]] }
@@ -442,7 +464,7 @@ if (BOT_TOKEN) {
   bot.on('callback_query', async q => {
     if (q.data !== 'ludo_new') return;
     try {
-      const host = { telegramId: String(q.from.id), username: q.from.username || '', firstName: q.from.first_name || 'Player', photoUrl: '' };
+      const host = telegramPlayer(q.from);
       const room = await createRoom({ mode: 'private', host });
       await bot.answerCallbackQuery(q.id);
       await bot.sendMessage(q.message.chat.id, `New Ludo room: ${room.roomCode}`, { reply_markup: { inline_keyboard: [[launchButton(room.roomCode, 'OPEN LUDO', q.message.chat.type === 'private')]] } });
