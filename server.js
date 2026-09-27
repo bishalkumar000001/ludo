@@ -53,7 +53,7 @@ function roomView(room) {
     current: room.current || 0,
     dice: room.dice ?? null,
     winner: room.winner ?? null,
-    board: room.board || null
+    tokens: room.tokens || null
   };
 }
 
@@ -71,7 +71,7 @@ async function createRoom({ mode = 'private', groupId = null, host = null }) {
       current: 0,
       dice: null,
       winner: null,
-      board: null,
+      tokens: null,
       createdAt: now(),
       updatedAt: now(),
       expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
@@ -145,36 +145,86 @@ function unregisterSocket(ws) {
   if (!sockets.get(code).size) sockets.delete(code);
 }
 
+const TRACK_LEN = 52;
+const FINISH = 57;
+const SAFE_CELLS = new Set([0, 8, 13, 21, 26, 34, 39, 47]);
+
+function freshTokens(playerCount) {
+  return Array.from({ length: playerCount }, () => [-1, -1, -1, -1]);
+}
+
+function globalCell(playerIndex, progress) {
+  if (progress < 0 || progress >= TRACK_LEN) return null;
+  return (playerIndex * 13 + progress) % TRACK_LEN;
+}
+
+function validMoves(room, playerIndex, dice) {
+  const tokens = room.tokens?.[playerIndex] || [];
+  return tokens.map((progress, tokenIndex) => {
+    if (progress >= FINISH) return null;
+    if (progress === -1) return dice === 6 ? tokenIndex : null;
+    return progress + dice <= FINISH ? tokenIndex : null;
+  }).filter(v => v !== null);
+}
+
+function advanceTurn(current, playerCount) {
+  return playerCount ? (current + 1) % playerCount : 0;
+}
+
 function scheduleTurn(code) {
   clearTimeout(timers.get(code));
-  timers.set(code, setTimeout(async () => {
-    const room = await getRoom(code);
-    if (!room || room.status !== 'playing') return;
-    const next = ((room.current || 0) + 1) % Math.max(room.players.length, 1);
-    await touchRoom(code, { current: next, dice: null });
-    await broadcastRoom(code);
-  }, 30000));
+  const timer = setTimeout(async () => {
+    try {
+      const room = await getRoom(code);
+      if (!room || room.status !== 'playing') return;
+      const next = advanceTurn(room.current || 0, room.players.length);
+      await touchRoom(code, { current: next, dice: null });
+      await broadcastRoom(code);
+      scheduleTurn(code);
+    } catch (e) {
+      console.error('turn timer:', e);
+    }
+  }, 30000);
+  timers.set(code, timer);
 }
+
+async function finishTurn(code, room, playerIndex, extraTurn = false) {
+  if (room.tokens[playerIndex].every(v => v === FINISH)) {
+    await touchRoom(code, { status: 'finished', winner: playerIndex, dice: null });
+    clearTimeout(timers.get(code));
+    await broadcastRoom(code);
+    return;
+  }
+  const next = extraTurn ? playerIndex : advanceTurn(playerIndex, room.players.length);
+  await touchRoom(code, { current: next, dice: null });
+  await broadcastRoom(code);
+  scheduleTurn(code);
+}
+
 
 wss.on('connection', ws => {
   ws.on('message', async raw => {
     try {
       const msg = JSON.parse(raw.toString());
-      const code = String(msg.roomCode || '').toUpperCase();
+      const code = String(msg.roomCode || '').trim().toUpperCase();
       if (!code) return send(ws, { type: 'error', message: 'Room code missing' });
 
       if (msg.type === 'join') {
         const room = await getRoom(code);
         if (!room) return send(ws, { type: 'error', code: 'ROOM_NOT_FOUND', message: 'Room not found or expired' });
-        registerSocket(code, ws);
-        let player = msg.player || {};
+
+        const player = msg.player || {};
         if (player.telegramId) {
+          const existing = (room.players || []).find(p => String(p.telegramId) === String(player.telegramId));
+          if (!existing && room.status !== 'waiting') {
+            return send(ws, { type: 'error', code: 'GAME_STARTED', message: 'This game has already started.' });
+          }
           try {
             const updated = await addPlayer(code, {
               telegramId: String(player.telegramId),
-              username: player.username || '',
-              firstName: player.firstName || 'Player',
-              photoUrl: player.photoUrl || ''
+              username: String(player.username || '').slice(0, 64),
+              firstName: String(player.firstName || 'Player').slice(0, 64),
+              photoUrl: String(player.photoUrl || '').slice(0, 1000)
             });
             if (!updated) return send(ws, { type: 'error', message: 'Could not join room' });
           } catch (e) {
@@ -182,6 +232,8 @@ wss.on('connection', ws => {
             throw e;
           }
         }
+
+        registerSocket(code, ws);
         const current = await getRoom(code);
         send(ws, { type: 'joined', room: roomView(current) });
         await broadcastRoom(code);
@@ -191,34 +243,110 @@ wss.on('connection', ws => {
       const room = await getRoom(code);
       if (!room) return send(ws, { type: 'error', code: 'ROOM_NOT_FOUND', message: 'Room not found or expired' });
 
+      const playerId = String(msg.telegramId || '');
+      const playerIndex = (room.players || []).findIndex(p => String(p.telegramId) === playerId);
+
       if (msg.type === 'start') {
+        if (playerIndex !== 0 || String(room.hostId) !== playerId) {
+          return send(ws, { type: 'error', message: 'Only the room host can start the game' });
+        }
+        if (room.status !== 'waiting') return;
         if ((room.players || []).length < 2) return send(ws, { type: 'error', message: 'Need at least 2 players to start' });
-        await touchRoom(code, { status: 'playing', current: 0, dice: null, winner: null });
-        scheduleTurn(code);
+        await touchRoom(code, {
+          status: 'playing',
+          current: 0,
+          dice: null,
+          winner: null,
+          tokens: freshTokens(room.players.length)
+        });
         await broadcastRoom(code);
-      } else if (msg.type === 'roll') {
-        if (room.status !== 'playing') return;
-        const playerId = String(msg.telegramId || '');
-        const currentPlayer = room.players?.[room.current];
-        if (!currentPlayer || String(currentPlayer.telegramId) !== playerId) return send(ws, { type: 'error', message: 'Not your turn' });
+        scheduleTurn(code);
+        return;
+      }
+
+      if (playerIndex < 0) return send(ws, { type: 'error', message: 'You are not in this room' });
+
+      if (msg.type === 'roll') {
+        if (room.status !== 'playing') return send(ws, { type: 'error', message: 'Game is not active' });
+        if (playerIndex !== room.current) return send(ws, { type: 'error', message: 'Not your turn' });
+        if (room.dice != null) return send(ws, { type: 'error', message: 'Move the rolled token first' });
+
         const dice = Math.floor(Math.random() * 6) + 1;
+        const moves = validMoves(room, playerIndex, dice);
         await touchRoom(code, { dice });
         await broadcastRoom(code);
-      } else if (msg.type === 'move') {
-        // Board/token movement is intentionally client-animation driven for now;
-        // the server records the move and advances the turn.
+
+        if (!moves.length) {
+          setTimeout(async () => {
+            try {
+              const latest = await getRoom(code);
+              if (!latest || latest.status !== 'playing' || latest.current !== playerIndex || latest.dice !== dice) return;
+              await finishTurn(code, latest, playerIndex, dice === 6);
+            } catch (e) { console.error('auto turn:', e); }
+          }, 900);
+        } else {
+          scheduleTurn(code);
+        }
+        return;
+      }
+
+      if (msg.type === 'move') {
         if (room.status !== 'playing') return;
-        const playerId = String(msg.telegramId || '');
-        const currentPlayer = room.players?.[room.current];
-        if (!currentPlayer || String(currentPlayer.telegramId) !== playerId) return send(ws, { type: 'error', message: 'Not your turn' });
-        const next = ((room.current || 0) + 1) % room.players.length;
-        await touchRoom(code, { current: next, dice: null });
-        scheduleTurn(code);
-        await broadcastRoom(code);
-      } else if (msg.type === 'rematch') {
-        await touchRoom(code, { status: 'waiting', current: 0, dice: null, winner: null });
+        if (playerIndex !== room.current) return send(ws, { type: 'error', message: 'Not your turn' });
+        const dice = Number(room.dice);
+        const tokenIndex = Number(msg.tokenIndex);
+        if (!Number.isInteger(tokenIndex) || tokenIndex < 0 || tokenIndex > 3) {
+          return send(ws, { type: 'error', message: 'Invalid token' });
+        }
+        if (!Number.isInteger(dice) || dice < 1 || dice > 6) {
+          return send(ws, { type: 'error', message: 'Roll the dice first' });
+        }
+
+        const moves = validMoves(room, playerIndex, dice);
+        if (!moves.includes(tokenIndex)) return send(ws, { type: 'error', message: 'That token cannot move' });
+
+        const tokens = (room.tokens || []).map(a => [...a]);
+        let nextProgress = tokens[playerIndex][tokenIndex];
+        nextProgress = nextProgress === -1 ? 0 : nextProgress + dice;
+        tokens[playerIndex][tokenIndex] = nextProgress;
+
+        let captured = false;
+        if (nextProgress < TRACK_LEN) {
+          const cell = globalCell(playerIndex, nextProgress);
+          if (!SAFE_CELLS.has(cell)) {
+            for (let i = 0; i < tokens.length; i++) {
+              if (i === playerIndex) continue;
+              for (let j = 0; j < 4; j++) {
+                if (tokens[i][j] >= 0 && tokens[i][j] < TRACK_LEN && globalCell(i, tokens[i][j]) === cell) {
+                  tokens[i][j] = -1;
+                  captured = true;
+                }
+              }
+            }
+          }
+        }
+
+        await touchRoom(code, { tokens });
+        const latest = await getRoom(code);
+        await finishTurn(code, latest, playerIndex, dice === 6 || captured);
+        return;
+      }
+
+      if (msg.type === 'rematch') {
+        if (playerIndex !== 0 || String(room.hostId) !== playerId) {
+          return send(ws, { type: 'error', message: 'Only the room host can start the rematch' });
+        }
+        if (room.status !== 'finished') return;
+        await touchRoom(code, {
+          status: 'waiting',
+          current: 0,
+          dice: null,
+          winner: null,
+          tokens: null
+        });
         clearTimeout(timers.get(code));
         await broadcastRoom(code);
+        return;
       }
     } catch (err) {
       console.error('WS error:', err);
@@ -303,7 +431,7 @@ if (BOT_TOKEN) {
       const host = { telegramId: String(msg.from.id), username: msg.from.username || '', firstName: msg.from.first_name || 'Player', photoUrl: '' };
       const room = await createRoom({ mode: msg.chat.type === 'private' ? 'private' : 'group', groupId: msg.chat.type === 'private' ? null : String(msg.chat.id), host });
       await bot.sendMessage(msg.chat.id, `🎲 VELOCITY LUDO\n\nRoom: ${room.roomCode}\nPlayers: 1/4`, {
-        reply_markup: { inline_keyboard: [[launchButton(room.roomCode, 'OPEN LUDO', q.message.chat.type === 'private')]] }
+        reply_markup: { inline_keyboard: [[launchButton(room.roomCode, 'OPEN LUDO', msg.chat.type === 'private')]] }
       });
     } catch (e) {
       console.error('/ludo:', e);
