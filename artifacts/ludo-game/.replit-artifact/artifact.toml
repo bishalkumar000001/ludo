@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Velocity Ludo"
+description = "A real-time multiplayer Ludo game for private rooms, with server-synchronized turns, legal token movement, win detection, and live player chat."
+version = "1.0.0"
+id = "artifacts/ludo-game"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 25345
+
+[services.development]
+run = "pnpm --filter @workspace/ludo-game run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/ludo-game", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/ludo-game/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "25345"
+BASE_PATH = "/"

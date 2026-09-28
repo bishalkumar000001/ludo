@@ -1,4 +1,0 @@
-IMPORTANT SECURITY NOTE
-
-Never paste your Telegram bot token into public logs, chats, screenshots, Git repositories, or support messages.
-If a bot token has been exposed, revoke it in BotFather and generate a new token, then update BOT_TOKEN on Heroku.
