@@ -1,0 +1,196 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: rooms
+    description: Ludo room operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /rooms:
+    post:
+      operationId: createRoom
+      tags: [rooms]
+      summary: Create a new Ludo room
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRoomInput"
+      responses:
+        "201":
+          description: Created room
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomResponse"
+        "400":
+          description: Invalid room request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /rooms/{roomCode}:
+    get:
+      operationId: getRoom
+      tags: [rooms]
+      summary: Get a Ludo room by code
+      parameters:
+        - name: roomCode
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 4
+            maxLength: 8
+      responses:
+        "200":
+          description: Room state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoomResponse"
+        "404":
+          description: Room not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    CreateRoomInput:
+      type: object
+      properties:
+        playerId:
+          type: string
+          minLength: 1
+          maxLength: 64
+        name:
+          type: string
+          minLength: 1
+          maxLength: 24
+        color:
+          type: string
+          enum: [red, blue, yellow, green]
+    RoomResponse:
+      type: object
+      required: [room]
+      properties:
+        room:
+          $ref: "#/components/schemas/Room"
+    Room:
+      type: object
+      required:
+        - roomCode
+        - status
+        - players
+        - currentPlayerId
+        - dice
+        - winnerId
+        - tokens
+        - messages
+      properties:
+        roomCode:
+          type: string
+        status:
+          type: string
+          enum: [waiting, playing, finished]
+        players:
+          type: array
+          items:
+            $ref: "#/components/schemas/Player"
+        currentPlayerId:
+          type: ["string", "null"]
+        dice:
+          type: ["integer", "null"]
+        validMoves:
+          type: array
+          items:
+            type: integer
+        winnerId:
+          type: ["string", "null"]
+        tokens:
+          type: array
+          items:
+            $ref: "#/components/schemas/Token"
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChatMessage"
+    Player:
+      type: object
+      required: [id, name, color, ready, connected]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        color:
+          type: string
+          enum: [red, blue, yellow, green]
+        ready:
+          type: boolean
+        connected:
+          type: boolean
+    Token:
+      type: object
+      required: [id, playerId, index, position]
+      properties:
+        id:
+          type: string
+        playerId:
+          type: string
+        index:
+          type: integer
+        position:
+          type: integer
+          description: -1 home, 0-51 shared path, 52-56 home stretch
+    ChatMessage:
+      type: object
+      required: [id, playerId, playerName, body, createdAt]
+      properties:
+        id:
+          type: string
+        playerId:
+          type: string
+        playerName:
+          type: string
+        body:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
