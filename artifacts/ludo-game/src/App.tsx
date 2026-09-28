@@ -221,7 +221,7 @@ function RoomView({ room, profile, setRoom }: { room: Room; profile: Profile; se
 function Game() {
   const [location, setLocation] = useLocation();
   const [profile, setProfile] = useState<Profile>(() => guestProfile());
-  const roomCode = useMemo(() => new URLSearchParams(window.location.search).get("room")?.toUpperCase() ?? "", [location]);
+  const roomCode = useMemo(() => new URLSearchParams(location.includes("?") ? location.slice(location.indexOf("?") + 1) : "").get("room")?.toUpperCase() ?? "", [location]);
   const [name, setName] = useState(profile.name);
   const [color, setColor] = useState<PlayerColor>(profile.color);
   const [localRoom, setLocalRoom] = useState<Room | null>(null);
@@ -236,34 +236,56 @@ function Game() {
   useEffect(() => {
     if (!roomCode) return;
     let cancelled = false;
-    const join = async () => {
-      setConnection("joining");
+    let timer: number | undefined;
+    let retry = 0;
+
+    const syncRoom = async (join = false) => {
+      if (cancelled) return;
+      if (!localRoom) setConnection("joining");
       try {
-        const joined = await fetch(`/api/rooms/${roomCode}/join`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ playerId: profile.id, name: profile.name, color: profile.color }) });
-        if (!joined.ok) throw new Error("Could not join this room");
-        const payload = (await joined.json()) as { room: Room };
+        if (join) {
+          const joined = await fetch(`/api/rooms/${roomCode}/join`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ playerId: profile.id, name: profile.name, color: profile.color }),
+          });
+          if (!joined.ok) {
+            const details = await joined.json().catch(() => ({}));
+            throw new Error(details?.message || "Could not join this room");
+          }
+          const payload = (await joined.json()) as { room: Room };
+          if (cancelled) return;
+          setLocalRoom(payload.room);
+        } else {
+          const response = await fetch(`/api/rooms/${roomCode}`, { cache: "no-store" });
+          if (!response.ok) throw new Error("Room is unavailable");
+          const payload = (await response.json()) as { room: Room };
+          if (cancelled) return;
+          setLocalRoom(payload.room);
+        }
+        retry = 0;
+        setConnection("live");
+      } catch (error) {
         if (cancelled) return;
-        setLocalRoom(payload.room);
-        const stream = new EventSource(`/api/rooms/${roomCode}/stream`);
-        stream.onopen = () => setConnection("live");
-        stream.onmessage = (event) => {
-          try {
-            const next = JSON.parse(event.data) as { room?: Room };
-            if (next.room) setLocalRoom(next.room);
-          } catch { /* Ignore a malformed event and wait for the next state snapshot. */ }
-        };
-        stream.onerror = () => setConnection("offline");
-        return () => stream.close();
-      } catch {
-        setJoinError("We could not join that table. The room may be full or already in motion.");
+        retry += 1;
         setConnection("offline");
+        if (retry >= 5) setJoinError(error instanceof Error ? error.message : "Connection to the table was lost.");
       }
-      return undefined;
     };
-    let cleanup: (() => void) | undefined;
-    void join().then((close) => { cleanup = close; });
-    return () => { cancelled = true; cleanup?.(); };
-  }, [roomCode, profile]);
+
+    void syncRoom(true);
+    const poll = () => {
+      if (cancelled) return;
+      void syncRoom(false);
+      timer = window.setTimeout(poll, 1500);
+    };
+    timer = window.setTimeout(poll, 1500);
+
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [roomCode, profile.id, profile.name, profile.color]);
   const copyRoom = () => { void navigator.clipboard?.writeText(window.location.href); };
   const create = () => {
     const nextProfile = { ...profile, name: name.trim() || profile.name, color };
