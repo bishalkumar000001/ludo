@@ -313,6 +313,7 @@ router.post("/rooms", (req, res) => {
 });
 
 router.get("/rooms/:roomCode", (req, res) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
   const room = findRoom(req.params.roomCode);
   if (!room) return res.status(404).json({ error: "Room not found." });
   return res.json(GetRoomResponse.parse({ room: safeRoom(room) }));
