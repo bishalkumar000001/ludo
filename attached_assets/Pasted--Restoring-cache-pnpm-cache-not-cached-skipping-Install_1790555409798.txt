@@ -1,0 +1,47 @@
+ Restoring cache
+       - pnpm cache (not cached - skipping)
+-----> Installing dependencies
+       Running 'pnpm install' with pnpm-lock.yaml
+       Scope: all 9 workspace projects
+       . preinstall$ sh -c 'rm -f package-lock.json yarn.lock; case "$npm_config_user_agent" in pnpm/*) ;; *) echo "Use pnpm instead" >&2; exit 1 ;; esac'
+       . preinstall: Done
+       ? Verifying lockfile against supply-chain policies (477 entries)...
+       Packages are hard linked from the content-addressable store to the virtual store.
+         Content-addressable store is at: /tmp/pnpmcache.zBBdL/v11
+         Virtual store is at:             node_modules/.pnpm
+       Downloading react-icons@5.7.0: 0.00 B/22.76 MB
+       ✓ Lockfile passes supply-chain policies (477 entries in 838ms)
+       Lockfile is up to date, resolution step is skipped
+       Packages: +475
+       ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+       Progress: resolved 475, reused 0, downloaded 475, added 475, done
+       
+       dependencies:
+       + @replit/connectors-sdk 0.4.3
+       
+       devDependencies:
+       + prettier 3.9.6
+       + typescript 5.9.3
+       
+       Error: ERR_PNPM_IGNORED_BUILDS
+       
+         × installing dependencies
+         ╰─▶ Ignored build scripts: esbuild@0.28.2
+         help: Run "pnpm approve-builds" to pick which dependencies should be allowed
+               to run scripts.
+       
+-----> Build failed
+ !     An unexpected error occurred while building your app.
+ !     
+ !     Failing command:
+ !     return "${pnpm_exit}"
+ !     
+ !     Stack trace:
+ !     build_dependencies @ /tmp/codon/tmp/buildpacks/2cd3309e34d34b154aac9f665b0eb2d2e86d8b8e/bin/compile:526
+ !     main @ /tmp/codon/tmp/buildpacks/2cd3309e34d34b154aac9f665b0eb2d2e86d8b8e/bin/compile:544
+ !     
+ !     Review the build log above for the cause. If this looks like a bug in the
+ !     buildpack rather than your app, open a support ticket:
+ !     https://help.heroku.com/
+ !     Push rejected, failed to compile Node.js app.
+ !     Push failed
