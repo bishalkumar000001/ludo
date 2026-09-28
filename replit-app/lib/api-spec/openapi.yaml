@@ -1,0 +1,161 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: rooms
+    description: Ludo room operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /rooms:
+    post:
+      operationId: createRoom
+      tags: [rooms]
+      summary: Create a Ludo room
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RoomInput"
+      responses:
+        "201":
+          description: Created room
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Room"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /rooms/{roomCode}:
+    get:
+      operationId: getRoom
+      tags: [rooms]
+      summary: Get a Ludo room
+      parameters:
+        - name: roomCode
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 4
+            maxLength: 8
+      responses:
+        "200":
+          description: Room state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Room"
+        "404":
+          description: Room not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+    Player:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        username:
+          type: ["string", "null"]
+        color:
+          type: string
+          enum: [red, green, yellow, blue]
+        isHost:
+          type: boolean
+        isSpectator:
+          type: boolean
+      required: [id, name, color, isHost, isSpectator]
+    Room:
+      type: object
+      properties:
+        roomCode:
+          type: string
+        status:
+          type: string
+          enum: [waiting, playing, finished]
+        players:
+          type: array
+          items:
+            $ref: "#/components/schemas/Player"
+        spectators:
+          type: integer
+        currentPlayer:
+          type: integer
+        dice:
+          type: ["integer", "null"]
+        winner:
+          type: ["integer", "null"]
+        tokens:
+          type: array
+          items:
+            type: array
+            items:
+              type: integer
+      required: [roomCode, status, players, spectators, currentPlayer, dice, winner, tokens]
+    RoomInput:
+      type: object
+      properties:
+        player:
+          $ref: "#/components/schemas/PlayerInput"
+        mode:
+          type: string
+          enum: [classic, quick]
+          default: classic
+      required: [player]
+    PlayerInput:
+      type: object
+      properties:
+        id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 1
+          maxLength: 64
+        username:
+          type: ["string", "null"]
+      required: [id, name]
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+

@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Ludo Arena"
+description = "A Telegram Mini App for real-time four-player Ludo with room codes, spectators, live chat, voice signaling, and a polished game board."
+version = "1.0.0"
+id = "artifacts/ludo-arena"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 26079
+
+[services.development]
+run = "pnpm --filter @workspace/ludo-arena run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/ludo-arena", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/ludo-arena/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "26079"
+BASE_PATH = "/"

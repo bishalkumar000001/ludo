@@ -1,45 +1,17 @@
-# Velocity Ludo — MongoDB Edition
+# Ludo Arena
 
-Heroku-ready Telegram Mini App Ludo backend with persistent rooms.
+This repository contains the original Heroku-ready Ludo entrypoint at the root and the upgraded realtime Telegram Mini App in replit-app/.
 
-## Required Heroku config vars
+## Upgraded app
 
-- `BOT_TOKEN` — Telegram bot token
-- `MONGODB_URI` — MongoDB Atlas connection string
-- `MONGODB_DB` — optional, defaults to `velocity_ludo`
-- `WEBAPP_URL` — your public Heroku URL, for example `https://your-app.herokuapp.com`
+The upgraded app includes a polished four-player board, server-authoritative dice and token movement, room creation and joining, spectators, live room chat, WebRTC voice signaling, Telegram Mini App deep links, reconnect handling, and a Heroku-compatible HTTP/WebSocket API service.
 
-## Deploy
+Run it from the upgraded workspace with pnpm:
 
-```bash
-npm install
-npm start
-```
+    cd replit-app
+    pnpm install
+    PORT=8080 pnpm --filter @workspace/api-server run dev
+    # in another terminal
+    PORT=26079 BASE_PATH=/ pnpm --filter @workspace/ludo-arena run dev
 
-For Heroku:
-
-```bash
-heroku config:set BOT_TOKEN="..."
-heroku config:set MONGODB_URI="mongodb+srv://..."
-heroku config:set MONGODB_DB="velocity_ludo"
-heroku config:set WEBAPP_URL="https://YOUR-APP.herokuapp.com"
-git push heroku main
-```
-
-## MongoDB
-
-The server automatically creates indexes for room codes, player IDs, and `expiresAt`. Rooms expire after 24 hours of inactivity and are removed by MongoDB's TTL index.
-
-## Telegram deep links
-
-The frontend accepts all common room sources:
-
-- `?room=ABC123`
-- `?tgWebAppStartParam=ABC123`
-- Telegram Mini App `initDataUnsafe.start_param`
-
-So `?tgWebAppStartParam=...` in Heroku logs is now handled correctly.
-
-## Important
-
-This version keeps live WebSocket connections in the dyno but persists room state in MongoDB. For multiple Heroku dynos, add Redis/pub-sub later so WebSocket clients on different dynos share live events.
+The root Procfile and root server.js remain available for the existing MongoDB-backed Heroku deployment.
